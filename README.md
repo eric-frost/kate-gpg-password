@@ -2,7 +2,7 @@
 
 Transparent **password-based (symmetric) encryption** for [Kate](https://kate-editor.org/) and other KTextEditor apps. Open an encrypted file, type a password, edit it like any other document, and it's re-encrypted on save. No keyrings, no key management — just a password.
 
-Files are written as ASCII-armored OpenPGP (AES-256), so they're **compatible with [Encrypted Notepad II](https://play.google.com/store/apps/details?id=org.scoutant.enpad) on Android** — edit the same encrypted note on your phone and your desktop.
+Files are written as ASCII-armored OpenPGP (AES-256), so they're **compatible with [Encrypted Notepad II](https://github.com/ivoras/EncryptedNotepad2)** — available for **Windows, Linux, and Android** ([binaries](https://payhip.com/b/q9s7S), or [build from source](https://github.com/ivoras/EncryptedNotepad2); macOS/iOS only if there's demand). Edit the same encrypted note on your phone and your desktop.
 
 > **Not the same as Kate's built-in GPG plugin** — see [How this differs](#how-this-differs-from-kates-built-in-gpg-plugin) below.
 
@@ -26,9 +26,11 @@ Since version 25.12, Kate bundles its own GPG plugin (originally [dennis2society
 | Key management | You manage a GPG keyring (`~/.gnupg`) | None — nothing to manage |
 | After save | Buffer shows the **ciphertext**; decrypt again to keep editing | Buffer **keeps showing plaintext** — edit continuously |
 | Decryption secret | A private key **stored on disk** | A passphrase that **only lives in your head** |
-| Legacy formats | — | Imports Notepad3 / [Encrypted Notepad II](https://play.google.com/store/apps/details?id=org.scoutant.enpad) |
+| Legacy formats | — | Imports Notepad3 / [Encrypted Notepad II](https://github.com/ivoras/EncryptedNotepad2) |
 
 Use Kate's built-in plugin to encrypt files *for other people*, to their OpenPGP keys. Use this one for a personal, password-locked note: nothing to manage, and it stays readable while you edit. (Kate's plugin *can* do symmetric too, but it isn't built around it.)
+
+> **Don't enable both plugins at once.** They hook the same document signals (`aboutToSave`, decrypt-on-open) for the same `.gpg`/`.asc` files and both rewrite the buffer, so on a shared file you'll get competing decrypt prompts and competing re-encryption on save — risking double-encryption or corruption. Enable whichever one matches your workflow, not both.
 
 ## Threat model: secrets vs. a compromised agent on your own machine
 
