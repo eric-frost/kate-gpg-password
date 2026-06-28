@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 Eric Frost -->
+<!-- SPDX-License-Identifier: MIT -->
+<!DOCTYPE gui SYSTEM "kpartgui.dtd">
+<gui name="kategpgpassword" library="kategpgpassword" version="3" translationDomain="kategpgpassword">
+    <MenuBar>
+        <Menu name="file">
+            <text>&amp;File</text>
+            <Action name="simple_gpg_set_password" group="save_merge"/>
+            <Action name="simple_gpg_clear_password" group="save_merge"/>
+        </Menu>
+    </MenuBar>
+</gui>

@@ -1,0 +1,19 @@
+version = 1
+
+# Strict-JSON metadata can't carry SPDX comment headers; declare it here instead.
+[[annotations]]
+path = "kategpgpassword.json"
+SPDX-FileCopyrightText = "2026 Eric Frost"
+SPDX-License-Identifier = "MIT"
+
+# Root LICENSE is a copy of LICENSES/MIT.txt for GitHub's license detection.
+[[annotations]]
+path = "LICENSE"
+SPDX-FileCopyrightText = "2026 Eric Frost"
+SPDX-License-Identifier = "MIT"
+
+# Documentation, media, and config files that don't carry inline SPDX headers.
+[[annotations]]
+path = ["**/*.md", ".gitignore", "REUSE.toml", "docs/**"]
+SPDX-FileCopyrightText = "2026 Eric Frost"
+SPDX-License-Identifier = "MIT"
