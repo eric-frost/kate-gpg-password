@@ -25,7 +25,6 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QProcess>
-#include <QRandomGenerator>
 #include <QStandardPaths>
 #include <QVBoxLayout>
 
@@ -106,17 +105,28 @@ KTextEditor::Document *KateGpgPasswordView::activeDocument() const
 
 void KateGpgPasswordView::connectDocument(KTextEditor::Document *doc)
 {
-    if (!doc) {
+    // Connect each document exactly once. We dedup explicitly rather than via
+    // Qt::UniqueConnection because Qt 6.10 makes UniqueConnection with a lambda a
+    // fatal error (it is only valid with pointer-to-member slots).
+    if (!doc || m_connectedDocs.contains(doc)) {
         return;
     }
-    connect(doc, &KTextEditor::Document::aboutToSave, this, &KateGpgPasswordView::encryptBeforeSave, Qt::UniqueConnection);
-    connect(doc, &KTextEditor::Document::documentSavedOrUploaded, this, &KateGpgPasswordView::restoreAfterSave, Qt::UniqueConnection);
+    m_connectedDocs.insert(doc);
+
+    connect(doc, &KTextEditor::Document::aboutToSave, this, &KateGpgPasswordView::encryptBeforeSave);
+    connect(doc, &KTextEditor::Document::documentSavedOrUploaded, this, &KateGpgPasswordView::restoreAfterSave);
     connect(doc, &KTextEditor::Document::aboutToClose, this, [this](KTextEditor::Document *closingDoc) {
         m_states.remove(closingDoc);
-    }, Qt::UniqueConnection);
+        m_connectedDocs.remove(closingDoc);
+    });
     connect(doc, &KTextEditor::Document::documentUrlChanged, this, [this](KTextEditor::Document *changedDoc) {
         QTimer::singleShot(0, this, [this, changedDoc] { maybeDecryptDocument(changedDoc); });
-    }, Qt::UniqueConnection);
+    });
+    connect(doc, &QObject::destroyed, this, [this](QObject *obj) {
+        auto *gone = static_cast<KTextEditor::Document *>(obj);
+        m_states.remove(gone);
+        m_connectedDocs.remove(gone);
+    });
     QTimer::singleShot(0, this, [this, doc] { maybeDecryptDocument(doc); });
 }
 
@@ -160,6 +170,12 @@ void KateGpgPasswordView::maybeDecryptDocument(KTextEditor::Document *doc)
     state.password = password;
     state.pendingPlaintext = plaintext;
     state.notepad3 = notepad3State;
+    // Remember the on-disk GPG armor so a later failed re-encrypt never has to fall
+    // back to writing plaintext. Notepad3 files migrate to GPG on first save, so they
+    // start with no GPG ciphertext.
+    if (format == EncryptionFormat::Gpg) {
+        state.lastCiphertext = QString::fromUtf8(raw);
+    }
     m_states.insert(doc, state);
 
     // Lambda that applies the pending plaintext once Kate has finished loading.
@@ -199,6 +215,8 @@ void KateGpgPasswordView::maybeDecryptDocument(KTextEditor::Document *doc)
 
         doc->setModified(false);
         doc->setEncoding(QStringLiteral("UTF-8"));
+        // The buffer now holds plaintext; saves may safely re-encrypt it.
+        st.plaintextApplied = true;
         // Never log plaintext content; only its length, to avoid leaking secrets to the debug log.
         logLine(QStringLiteral("setText done, docChars=%1").arg(doc->text().size()));
 
@@ -246,6 +264,10 @@ void KateGpgPasswordView::setPasswordForActiveDocument()
         showMessage(i18n("No active document."), QStringLiteral("Error"));
         return;
     }
+    if (!gpgAvailable()) {
+        showMessage(i18n("gpg was not found in PATH; cannot enable encryption."), QStringLiteral("Error"));
+        return;
+    }
     connectDocument(doc);
     QString password;
     if (!askNewEncryptionPassword(&password)) {
@@ -254,6 +276,9 @@ void KateGpgPasswordView::setPasswordForActiveDocument()
     DocumentState &state = m_states[doc];
     state.encrypted = true;
     state.password = password;
+    // The buffer already holds the user's plaintext, so saves may encrypt it.
+    state.plaintextApplied = true;
+    state.format = EncryptionFormat::Gpg;
     doc->setModified(true);
     showMessage(i18n("Encryption password set. Normal Save will write encrypted text."));
 }
@@ -278,10 +303,48 @@ void KateGpgPasswordView::encryptBeforeSave(KTextEditor::Document *doc)
     if (!state.encrypted || state.password.isEmpty()) {
         return;
     }
-    // Just record that we need to encrypt after Kate finishes writing.
-    state.plaintext = doc->text();
-    state.restoring = true;
-    logLine(QStringLiteral("encryptBeforeSave: captured plaintext chars=%1").arg(state.plaintext.size()));
+    // 1. Decrypt has not been applied yet: the buffer still holds the on-disk
+    // ciphertext, so let Kate write it back unchanged. Never re-encrypt ciphertext
+    // (this also closes the open-then-save-during-settle "nested armor" window).
+    if (!state.plaintextApplied) {
+        return;
+    }
+
+    // 2. Notepad3 is import-only — its binary container cannot round-trip through a
+    // text buffer. Migrate the document to GPG (salted, integrity-protected) on save.
+    if (state.format == EncryptionFormat::Notepad3) {
+        showMessage(i18n("Legacy Notepad3 file will be saved as GPG-encrypted (AES-256)."));
+        state.format = EncryptionFormat::Gpg;
+    }
+
+    // 3. Encrypt the current plaintext and swap it into the buffer BEFORE Kate
+    // writes, so Kate's own atomic save persists ciphertext. Plaintext is never
+    // serialized to the real file on any save path (Ctrl+S, close prompt, Save All).
+    const QString plaintext = doc->text();
+    QByteArray ciphertext;
+    QString errorText;
+    if (encryptToBytes(plaintext, state.password, &ciphertext, &errorText)) {
+        state.lastCiphertext = QString::fromUtf8(ciphertext);
+        state.plaintext = plaintext;
+        state.saveFailed = false;
+        state.bufferSwapped = true;
+        doc->setText(state.lastCiphertext);
+        logLine(QStringLiteral("encryptBeforeSave: swapped buffer to ciphertext chars=%1").arg(state.lastCiphertext.size()));
+        return;
+    }
+
+    // 4. Encryption failed. Never let Kate write plaintext: if we have a previous
+    // ciphertext, write that instead (the edit is not persisted and the document is
+    // kept modified). Only a brand-new, never-saved document with a broken gpg can
+    // reach the fall-through, and gpg presence is checked before encryption is enabled.
+    logLine(QStringLiteral("encryptBeforeSave: encrypt failed: %1").arg(errorText));
+    showMessage(i18n("Encrypt failed, changes NOT saved: %1", errorText), QStringLiteral("Error"));
+    if (!state.lastCiphertext.isEmpty()) {
+        state.plaintext = plaintext;
+        state.saveFailed = true;
+        state.bufferSwapped = true;
+        doc->setText(state.lastCiphertext);
+    }
 }
 
 void KateGpgPasswordView::restoreAfterSave(KTextEditor::Document *doc, bool)
@@ -290,43 +353,24 @@ void KateGpgPasswordView::restoreAfterSave(KTextEditor::Document *doc, bool)
         return;
     }
     DocumentState &state = m_states[doc];
-    if (!state.restoring) {
+    if (!state.bufferSwapped) {
         return;
     }
-    state.restoring = false;
+    state.bufferSwapped = false;
 
-    const QString filePath = doc->url().toLocalFile();
-    if (filePath.isEmpty()) {
-        logLine(QStringLiteral("restoreAfterSave: no local file path, skipping encrypt"));
-        return;
+    // Kate has written the ciphertext to disk; restore the editable plaintext view.
+    // On a failed encrypt keep the document modified so the user knows it is unsaved.
+    const bool failed = state.saveFailed;
+    const QString plaintext = state.plaintext;
+    state.plaintext.clear();
+    state.saveFailed = false;
+    doc->setText(plaintext);
+    doc->setModified(failed);
+    doc->setEncoding(QStringLiteral("UTF-8"));
+    if (!failed) {
+        showMessage(i18n("Saved encrypted."));
     }
-
-    QByteArray ciphertext;
-    QString errorText;
-    const bool encrypted = (state.format == EncryptionFormat::Notepad3)
-        ? encryptNotepad3Bytes(state.plaintext, state.notepad3, &ciphertext, &errorText)
-        : encryptToBytes(state.plaintext, state.password, &ciphertext, &errorText);
-    if (!encrypted) {
-        logLine(QStringLiteral("restoreAfterSave: encrypt failed: %1").arg(errorText));
-        showMessage(i18n("Encrypt failed: %1", errorText), QStringLiteral("Error"));
-        return;
-    }
-
-    // Write encrypted bytes directly to disk, overwriting Kate's plaintext save.
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        logLine(QStringLiteral("restoreAfterSave: could not open file for writing: %1").arg(file.errorString()));
-        showMessage(i18n("Could not write encrypted file: %1", file.errorString()), QStringLiteral("Error"));
-        return;
-    }
-    file.write(ciphertext);
-    file.close();
-
-    logLine(QStringLiteral("restoreAfterSave: wrote %1 encrypted bytes to %2").arg(ciphertext.size()).arg(filePath));
-    showMessage(i18n("Saved encrypted (%1 bytes).", ciphertext.size()));
-
-    // Keep the document showing plaintext and not modified.
-    doc->setModified(false);
+    logLine(QStringLiteral("restoreAfterSave: restored plaintext view, failed=%1").arg(failed));
 }
 
 bool KateGpgPasswordView::askPassword(const QString &title, QString *password)
@@ -553,32 +597,6 @@ bool KateGpgPasswordView::decryptNotepad3Bytes(const QByteArray &ciphertext, con
     return true;
 }
 
-bool KateGpgPasswordView::encryptNotepad3Bytes(const QString &plaintext, const Notepad3State &state, QByteArray *ciphertext, QString *errorText) const
-{
-    if (state.fileKey.size() != KeyBytes) {
-        *errorText = QStringLiteral("missing Notepad3 file key");
-        return false;
-    }
-
-    const QByteArray fileIv = randomBytes(AesBlockSize);
-    QByteArray payload;
-    if (!aes256CbcCrypt(plaintext.toUtf8(), state.fileKey, fileIv, true, true, &payload, errorText)) {
-        return false;
-    }
-
-    ciphertext->clear();
-    appendLe32(ciphertext, Notepad3Preamble);
-    const bool hasMasterHeader = state.masterIv.size() == AesBlockSize && state.encryptedFileKey.size() == KeyBytes;
-    appendLe32(ciphertext, hasMasterHeader ? Notepad3MasterKeyFormat : Notepad3FileKeyFormat);
-    ciphertext->append(fileIv);
-    if (hasMasterHeader) {
-        ciphertext->append(state.masterIv);
-        ciphertext->append(state.encryptedFileKey);
-    }
-    ciphertext->append(payload);
-    return true;
-}
-
 QByteArray KateGpgPasswordView::notepad3PassphraseBytes(const QString &password) const
 {
     QByteArray bytes;
@@ -645,25 +663,6 @@ bool KateGpgPasswordView::aes256CbcCrypt(const QByteArray &input, const QByteArr
     return ok;
 }
 
-QByteArray KateGpgPasswordView::randomBytes(int size) const
-{
-    // Use QRandomGenerator::system() (the OS CSPRNG, e.g. getrandom/dev-urandom)
-    // rather than global(), which is only a securely-seeded PRNG — IVs must be
-    // unpredictable for AES-CBC.
-    QByteArray bytes(size, Qt::Uninitialized);
-    QRandomGenerator *gen = QRandomGenerator::system();
-    int i = 0;
-    for (; i + 4 <= size; i += 4) {
-        const quint32 v = gen->generate();
-        memcpy(bytes.data() + i, &v, sizeof(v));
-    }
-    if (i < size) {
-        const quint32 v = gen->generate();
-        memcpy(bytes.data() + i, &v, size - i);
-    }
-    return bytes;
-}
-
 quint32 KateGpgPasswordView::readLe32(const QByteArray &bytes, int offset) const
 {
     const auto b0 = static_cast<quint32>(static_cast<unsigned char>(bytes[offset]));
@@ -673,12 +672,9 @@ quint32 KateGpgPasswordView::readLe32(const QByteArray &bytes, int offset) const
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-void KateGpgPasswordView::appendLe32(QByteArray *bytes, quint32 value) const
+bool KateGpgPasswordView::gpgAvailable() const
 {
-    bytes->append(static_cast<char>(value & 0xff));
-    bytes->append(static_cast<char>((value >> 8) & 0xff));
-    bytes->append(static_cast<char>((value >> 16) & 0xff));
-    bytes->append(static_cast<char>((value >> 24) & 0xff));
+    return !QStandardPaths::findExecutable(QStringLiteral("gpg")).isEmpty();
 }
 
 void KateGpgPasswordView::logLine(const QString &text) const

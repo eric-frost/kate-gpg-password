@@ -11,10 +11,10 @@ Files are written as ASCII-armored OpenPGP (AES-256), so they're **compatible wi
 ## Features
 
 - Transparent decrypt on open for `.gpg` / `.pgp` files, or any file starting with `-----BEGIN PGP MESSAGE-----`.
-- Re-encrypts on normal Save / Save As — the editor keeps showing plaintext; only the file on disk is encrypted.
+- Re-encrypts on normal Save / Save As — the editor keeps showing plaintext; only the file on disk is encrypted. Encryption happens **before** Kate writes, so plaintext is never written to the target file on any save path.
 - **File → Set Encryption Password** to turn any plaintext document into an encrypted one.
 - Symmetric OpenPGP, ASCII-armored, AES-256 — interoperable with GnuPG (`gpg -d file.gpg`) and Encrypted Notepad II.
-- **Legacy import** of Notepad3 / NotepadCrypt encrypted files (read + write-back). See the security notes — this format is weak and import-only.
+- **Legacy import** of Notepad3 / NotepadCrypt encrypted files (read-only; saving migrates the file to the stronger GPG format). See the security notes — the Notepad3 format is weak.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ This is encryption software — please read [SECURITY.md](SECURITY.md) before tr
 
 - New files use OpenPGP symmetric encryption (AES-256, salted+iterated S2K) via `gpg`.
 - The passphrase is passed to `gpg` over stdin (never argv or a temp file) and symmetric passphrase caching is disabled.
-- **Notepad3 import is legacy-compatibility only**: its key derivation is unsalted single-pass SHA-256 and the format has no integrity check. Don't use it for new notes.
+- **Notepad3 import is legacy-compatibility only**: its key derivation is unsalted single-pass SHA-256 and the format has no integrity check. Files are read-only — saving rewrites them as GPG. Don't use the Notepad3 format for new notes.
 - Kate may write a crash-recovery swap file containing decrypted text. See SECURITY.md for the mitigation.
 
 Report vulnerabilities privately — see [SECURITY.md](SECURITY.md).

@@ -10,7 +10,7 @@
 #include <QByteArray>
 #include <QHash>
 #include <QObject>
-#include <QRandomGenerator>
+#include <QSet>
 #include <QVariant>
 #include <QString>
 
@@ -59,11 +59,14 @@ private:
 
     struct DocumentState {
         bool encrypted = false;
-        bool restoring = false;
+        bool plaintextApplied = false;  // decrypt applied to the buffer (or a new doc whose buffer is already plaintext)
+        bool bufferSwapped = false;     // aboutToSave swapped the buffer to ciphertext; restore plaintext after the write
+        bool saveFailed = false;        // last encrypt failed; keep the document modified after restoring the view
         EncryptionFormat format = EncryptionFormat::Gpg;
         QString password;
-        QString plaintext;
+        QString plaintext;              // transient: stashed only across a single save swap
         QString pendingPlaintext;
+        QString lastCiphertext;         // last ciphertext read/written, so a failed encrypt never leaves plaintext on disk
         Notepad3State notepad3;
     };
 
@@ -77,16 +80,15 @@ private:
     bool decryptBytes(const QByteArray &ciphertext, const QString &password, QString *plaintext, QString *errorText) const;
     bool encryptToBytes(const QString &plaintext, const QString &password, QByteArray *ciphertext, QString *errorText) const;
     bool decryptNotepad3Bytes(const QByteArray &ciphertext, const QString &password, QString *plaintext, Notepad3State *state, QString *errorText) const;
-    bool encryptNotepad3Bytes(const QString &plaintext, const Notepad3State &state, QByteArray *ciphertext, QString *errorText) const;
     QByteArray notepad3PassphraseBytes(const QString &password) const;
     QByteArray sha256(const QByteArray &bytes) const;
     bool aes256CbcCrypt(const QByteArray &input, const QByteArray &key, const QByteArray &iv, bool encrypt, bool padding, QByteArray *output, QString *errorText) const;
-    QByteArray randomBytes(int size) const;
     quint32 readLe32(const QByteArray &bytes, int offset) const;
-    void appendLe32(QByteArray *bytes, quint32 value) const;
+    bool gpgAvailable() const;
     void logLine(const QString &text) const;
     void showMessage(const QString &text, const QString &type = QStringLiteral("Information"));
 
     KTextEditor::MainWindow *m_mainWindow = nullptr;
     QHash<KTextEditor::Document *, DocumentState> m_states;
+    QSet<KTextEditor::Document *> m_connectedDocs;
 };
