@@ -40,12 +40,11 @@ issue. (Replace with your preferred contact before publishing.)
    them back: saving an imported Notepad3 file migrates it to the stronger GPG
    format. **Never create new secrets in the Notepad3 format.**
 
-2. **Kate swap files may persist decrypted text.** Kate writes a crash-recovery
-   swap file (e.g. `.<name>.kate-swp`) that can contain unsaved buffer
-   contents — which here is *plaintext*. There is no clean per-document API to
-   disable it. To avoid leaving plaintext on disk, disable swap files in
-   **Settings → Configure Kate → Open/Save → Advanced → Backup & Swap** (set swap
-   file to *Disabled*), ideally on an encrypted home/partition.
+2. **Kate's swap file can persist plaintext while you edit.** Kate continuously
+   writes the editor buffer — here, your decrypted *plaintext* — to a crash-recovery
+   swap file. No KTextEditor plugin can prevent this; it is a Kate-wide setting.
+   It is closable with a one-time configuration change — see
+   [Closing the Kate swap-file leak](#closing-the-kate-swap-file-leak).
 
 3. **Plaintext and passphrases live in process memory** as Qt strings and are not
    securely wiped. Qt's implicit sharing makes reliable zeroization impractical.
@@ -57,6 +56,59 @@ issue. (Replace with your preferred contact before publishing.)
 
 5. **A passphrase containing a newline** will be truncated at the first newline
    (it is passed as the first stdin line). Avoid newlines in passphrases.
+
+## Closing the Kate swap-file leak
+
+### The issue
+
+For crash recovery, Kate continuously writes the open editor buffer to a *swap
+file* and re-syncs it on a timer (every 15 s by default). While you have a
+decrypted document open, that buffer is your **plaintext**, so the plaintext is
+written to disk even though the file itself is encrypted. With Kate's default
+setting the swap file is a sibling of your document — `~/secret.gpg` produces
+`~/.secret.gpg.kate-swp` (mode `0600`, owner-only) — and it persists until the
+document is closed cleanly.
+
+This is **not specific to this plugin and cannot be fixed by any plugin**: the
+swap file is a global Kate setting with no per-document API. The GPG plugin
+bundled with Kate exposes plaintext to the swap file in exactly the same way. So
+it must be addressed once, in Kate's configuration, for all files.
+
+### Fix 1 — Redirect the swap file to RAM (keeps crash recovery)
+
+Point Kate's swap directory at a `tmpfs` (RAM-backed) location, so the swap file
+lives in memory and never touches persistent disk:
+
+- **GUI:** Settings → Configure Kate → Open/Save → Advanced → *Swap file mode* →
+  store swap files in a single directory, and set that directory to a tmpfs path
+  (e.g. `/run/user/<your-uid>/kate-swap`, or `/tmp`).
+- **Or `~/.config/katerc`:**
+  ```ini
+  [KTextEditor Document]
+  Swap File Mode=2
+  Swap Directory=/run/user/1000/kate-swap
+  ```
+  (replace `1000` with your UID — `id -u`.)
+
+Residual risk: the plaintext still exists in RAM-backed tmpfs (readable by you and
+root, and it can be paged to the system swap *partition* under memory pressure).
+Use an **encrypted swap partition** to close that last gap.
+
+### Fix 2 — Disable the swap file entirely (simplest)
+
+No swap file is ever written:
+
+- **GUI:** the same dialog → *Swap file mode* → disable.
+- **Or `~/.config/katerc`:**
+  ```ini
+  [KTextEditor Document]
+  Swap File Mode=0
+  ```
+
+Cost: you lose Kate's crash recovery for **all** files, not just encrypted ones.
+
+Either change takes effect on the next **Kate restart** (or immediately if applied
+through the GUI dialog).
 
 ## Cryptographic summary
 
