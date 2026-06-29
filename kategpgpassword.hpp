@@ -71,6 +71,8 @@ private:
     };
 
     KTextEditor::Document *activeDocument() const;
+    void warnIfConflictingPluginLoaded();
+    void postConflictMessage(int attempt);
     bool askPassword(const QString &title, QString *password);
     bool askNewEncryptionPassword(QString *password);
     bool isProbablyEncrypted(KTextEditor::Document *doc, const QByteArray &raw) const;

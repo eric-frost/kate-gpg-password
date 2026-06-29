@@ -7,7 +7,11 @@
 #include <KLocalizedString>
 #include <KPasswordDialog>
 #include <KPluginFactory>
+#include <KTextEditor/Application>
 #include <KTextEditor/Document>
+#include <KTextEditor/Editor>
+#include <KTextEditor/Message>
+#include <KTextEditor/Plugin>
 #include <KTextEditor/View>
 #include <KParts/ReadOnlyPart>
 #include <KMessageWidget>
@@ -88,6 +92,18 @@ KateGpgPasswordView::KateGpgPasswordView(KateGpgPasswordPlugin *, KTextEditor::M
     if (m_mainWindow && m_mainWindow->guiFactory()) {
         m_mainWindow->guiFactory()->addClient(this);
     }
+
+    // Warn if Kate's built-in GPG plugin is also enabled: both hook the same
+    // save/decrypt signals on .gpg/.asc files and can conflict. Warn now, and
+    // again if it gets enabled later this session.
+    warnIfConflictingPluginLoaded();
+    if (KTextEditor::Application *app = KTextEditor::Editor::instance() ? KTextEditor::Editor::instance()->application() : nullptr) {
+        connect(app, &KTextEditor::Application::pluginCreated, this, [this](const QString &name, KTextEditor::Plugin *) {
+            if (name == QLatin1String("kategpgplugin")) {
+                warnIfConflictingPluginLoaded();
+            }
+        });
+    }
 }
 
 KateGpgPasswordView::~KateGpgPasswordView()
@@ -95,6 +111,51 @@ KateGpgPasswordView::~KateGpgPasswordView()
     if (m_mainWindow && m_mainWindow->guiFactory()) {
         m_mainWindow->guiFactory()->removeClient(this);
     }
+}
+
+void KateGpgPasswordView::warnIfConflictingPluginLoaded()
+{
+    // Detect Kate's built-in GPG plugin via the public plugin registry. Warn once
+    // per session so multiple windows don't spam the message bar.
+    static bool warned = false;
+    if (warned) {
+        return;
+    }
+    KTextEditor::Editor *editor = KTextEditor::Editor::instance();
+    KTextEditor::Application *app = editor ? editor->application() : nullptr;
+    const bool conflict = app && app->plugin(QStringLiteral("kategpgplugin"));
+    logLine(QStringLiteral("warnIfConflictingPluginLoaded: app=%1 kategpgplugin-loaded=%2").arg(app != nullptr).arg(conflict));
+    if (!conflict) {
+        return;
+    }
+    warned = true;
+    postConflictMessage(0);
+}
+
+void KateGpgPasswordView::postConflictMessage(int attempt)
+{
+    // Show a persistent, dismissable warning bar in the editor (not a transient
+    // Output-panel note). Needs an active document; retry briefly during startup.
+    KTextEditor::Document *doc = activeDocument();
+    if (!doc) {
+        if (attempt < 6) {
+            QTimer::singleShot(500, this, [this, attempt] { postConflictMessage(attempt + 1); });
+        }
+        return;
+    }
+    auto *msg = new KTextEditor::Message(
+        i18n("<b>Kate's built-in GPG plugin is also enabled.</b> Both this and the built-in "
+             "plugin act on encrypted files and can conflict — risking double password prompts "
+             "and corrupted saves. Please enable only one (Settings → Configure Kate → Plugins)."),
+        KTextEditor::Message::Warning);
+    msg->setPosition(KTextEditor::Message::TopInView);
+    msg->setWordWrap(true);
+    msg->setAutoHide(-1);
+    auto *dismiss = new QAction(i18n("Dismiss"), msg);
+    connect(dismiss, &QAction::triggered, msg, &QObject::deleteLater);
+    msg->addAction(dismiss, false);
+    logLine(QStringLiteral("postConflictMessage: posted conflict warning bar"));
+    doc->postMessage(msg);
 }
 
 KTextEditor::Document *KateGpgPasswordView::activeDocument() const
@@ -317,10 +378,19 @@ void KateGpgPasswordView::encryptBeforeSave(KTextEditor::Document *doc)
         state.format = EncryptionFormat::Gpg;
     }
 
-    // 3. Encrypt the current plaintext and swap it into the buffer BEFORE Kate
+    // 3. Defend against a conflicting GPG plugin: if the buffer is already a complete
+    // GPG armored block (e.g. Kate's built-in GPG plugin encrypted it first on the
+    // same aboutToSave), don't double-encrypt — let that ciphertext save as-is.
+    const QString plaintext = doc->text();
+    if (plaintext.startsWith(QStringLiteral("-----BEGIN PGP MESSAGE-----"))
+        && plaintext.contains(QStringLiteral("-----END PGP MESSAGE-----"))) {
+        logLine(QStringLiteral("encryptBeforeSave: buffer already ciphertext (conflicting plugin?), not re-encrypting"));
+        return;
+    }
+
+    // 4. Encrypt the current plaintext and swap it into the buffer BEFORE Kate
     // writes, so Kate's own atomic save persists ciphertext. Plaintext is never
     // serialized to the real file on any save path (Ctrl+S, close prompt, Save All).
-    const QString plaintext = doc->text();
     QByteArray ciphertext;
     QString errorText;
     if (encryptToBytes(plaintext, state.password, &ciphertext, &errorText)) {

@@ -30,7 +30,7 @@ Since version 25.12, Kate bundles its own GPG plugin (originally [dennis2society
 
 Use Kate's built-in plugin to encrypt files *for other people*, to their OpenPGP keys. Use this one for a personal, password-locked note: nothing to manage, and it stays readable while you edit. (Kate's plugin *can* do symmetric too, but it isn't built around it.)
 
-> **Don't enable both plugins at once.** They hook the same document signals (`aboutToSave`, decrypt-on-open) for the same `.gpg`/`.asc` files and both rewrite the buffer, so on a shared file you'll get competing decrypt prompts and competing re-encryption on save — risking double-encryption or corruption. Enable whichever one matches your workflow, not both.
+> **Don't enable both plugins at once.** They hook the same document signals (`aboutToSave`, decrypt-on-open) for the same `.gpg`/`.asc` files and both rewrite the buffer, so on a shared file you'll get competing decrypt prompts and competing re-encryption on save — risking double-encryption or corruption. Enable whichever one matches your workflow, not both. (If both *are* enabled, this plugin shows a warning bar and refuses to re-encrypt a buffer the other plugin already encrypted.)
 
 ## Threat model: secrets vs. a compromised agent on your own machine
 

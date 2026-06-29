@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.24)
-project(kategpgpassword VERSION 0.5.0)
+project(kategpgpassword VERSION 0.5.1)
 
 set(QT_MIN_VERSION 6.6)
 set(KF_MIN_VERSION 6.0)
